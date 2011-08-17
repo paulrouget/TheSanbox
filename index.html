@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html>
+    
+    <head>
+        <title>
+            The Sandbox
+        </title>
+        <script src="CubicVR/CubicVR.js" type="text/javascript"></script>
+        <script src="lib/processing-1.0.0.min.js" type="text/javascript"></script>
+        <script src="lib/beatdetektor.js" type="text/javascript"></script>
+        <script src="lib/dsp.js" type="text/javascript"></script>
+        
+        <!-- sequencer banks -->
+        <script src="banks.js" type="text/javascript"></script>
+
+        <script type='text/javascript'>
+            var canvas_w, canvas_h, aspect;
+
+            var gl;
+
+            function initGL(canvas) {
+                try {
+                    gl = canvas.getContext("experimental-webgl");
+                    gl.viewport(0, 0, canvas.width, canvas.height);
+                } catch (e) {}
+                if (!gl) {
+                    alert("Could not initialise WebGL, sorry :-(");
+                }
+
+                CubicVR.GLCore.init(gl, "CubicVR/CubicVR_Core.vs", "CubicVR/CubicVR_Core.fs");
+                CubicVR.setGlobalDepthAlpha(true,1.0,0.0);  // enable rendering of linear depth to the alpha channel
+            }
+
+
+            var fxChain = null;
+
+            var shaderBlockTwist = null;
+            var shaderKickSine = null;
+            var shaderScanlineShake = null;
+            var shaderCheapTV = null;
+            var shaderBloom = null;
+            var shaderBloom2 = null;
+            var shaderDepth = null;
+            var shaderInvert = null;
+            var shaderDOF6 = null;
+            var shaderBloom6 = null;
+            var shaderSSAO = null;
+            var shaderPixelate = null;
+            var shaderHalfBloom = null;
+            var shaderQuarterBloom = null;
+
+            var shaderList = [];
+
+      			function setupShaderFX(width,height)
+      			{
+      			  fxChain = new CubicVR.PostProcessChain(width,height,true);
+      			  fxChain.setBlurOpacity(0.3);
+      			  fxChain.setBlurIntensity(0.7);
+
+      				// sine wave block twist
+      				shaderBlockTwist = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"shader_custom/block_twist.fs"
+      				});
+
+      				// sine wave color tear + kick
+      				shaderKickSine = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"shader_custom/kick_sine.fs",
+      				  init: function(shader) { shader.addFloat("kickSource",0.0); },
+      				  onupdate: function(shader) { shader.setFloat("kickSource",triggerVal[triggerKey.CLAP]); }
+      				});
+
+      				// simple convolution test shader 3
+      				shaderScanlineShake = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"shader_custom/scanline_shake.fs",
+      				  init: function(shader) { 
+      				    shader.addFloat("kickSource",0.0);
+        				  shader.addFloat("timerSeconds",0.0);
+        				 },
+      				  onupdate: function(shader) { 
+                  shader.setFloat("kickSource",triggerVal[triggerKey.CLAP]);
+                  shader.setFloat("timerSeconds",timerSeconds);      				    
+      				  }
+      				});
+
+      				// simple convolution test shader 4
+      				shaderCheapTV = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"shader_custom/cheap_tv.fs",
+      				  init: function(shader) { 
+      				    shader.addFloat("kickSource",0.0);
+        				 },
+      				  onupdate: function(shader) { 
+                  shader.setFloat("kickSource",triggerVal[triggerKey.CLAP]);
+      				  }
+      				});
+      				
+              // // new bloom shader test
+              // shaderBloom = new CubicVR.PostProcessShader({
+              //   shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+              //   shader_fragment:"CubicVR/post_shaders/bloom_linear.fs",
+              //   outputMode: CubicVR.enums.post.output.ADD
+              // });
+              // 
+              // // new bloom shader test pass 2
+              // shaderBloom2 = new CubicVR.PostProcessShader({
+              //   shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+              //   shader_fragment:"CubicVR/post_shaders/bloom_linear.fs",
+              //   outputMode: CubicVR.enums.post.output.ADD
+              // });
+              // 
+              // 
+              // // new bloom shader test (6-tap)
+              // shaderBloom6 = new CubicVR.PostProcessShader({
+              //   shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+              //   shader_fragment:"CubicVR/post_shaders/bloom_6tap.fs",
+              //                 outputMode: CubicVR.enums.post.output.ADD
+              // });
+
+              // expose the alphaDepth buffer
+      				shaderDepth = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"CubicVR/post_shaders/alpha_depth.fs",
+      				});
+
+
+              // simple color invert
+      				shaderInvert = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"CubicVR/post_shaders/invert.fs"
+      				});
+
+              shaderDOF6 = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"CubicVR/post_shaders/dof_6tap.fs",
+      				  init: function(shader) {
+      				    shader.addFloat("near_depth");
+      				    shader.addFloat("far_depth");
+      				  },
+      				  onupdate: function(shader) {
+      				    // linear depth
+      				    var d = CubicVR.vec3.length(scene.camera.position,scene.camera.target);
+      				    shader.setFloat("near_depth",(CubicVR.GLCore.depth_alpha_near+5.0)/CubicVR.GLCore.depth_alpha_far);
+      				    shader.setFloat("far_depth",(d)/CubicVR.GLCore.depth_alpha_far);
+      				  }
+      				  
+      				});
+
+
+              shaderSSAO = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"CubicVR/post_shaders/ssao.fs",
+      				  init: function(shader) {
+      				    shader.addFloat("near_depth");
+      				    shader.addFloat("far_depth");
+      				  },
+      				  onupdate: function(shader) {
+      				    shader.setFloat("near_depth",0.0);
+      				    shader.setFloat("far_depth",1.0);
+      				  }
+      				  
+      				});
+
+      				// simple divisor pixelation
+      				shaderPixelate = new CubicVR.PostProcessShader({
+                shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+                shader_fragment:"CubicVR/post_shaders/copy.fs",
+                outputMode: CubicVR.enums.post.output.REPLACE,
+                outputDivisor: 6
+      				});
+
+
+      				// Bloom + 1/2 divisor + blend
+      				shaderHalfBloom = new CubicVR.PostProcessShader({
+                shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+                shader_fragment:"CubicVR/post_shaders/bloom_6tap.fs",
+                outputMode: CubicVR.enums.post.output.ADD,
+                outputDivisor: 2
+      				});
+
+
+      				// Bloom + 1/4 divisor + blend
+      				shaderQuarterBloom = new CubicVR.PostProcessShader({
+                shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+                shader_fragment:"CubicVR/post_shaders/bloom_6tap.fs",
+                outputMode: CubicVR.enums.post.output.ADD,
+                outputDivisor: 4
+      				});
+
+              // simple color normalizer
+      				shaderNorm = new CubicVR.PostProcessShader({
+      				  shader_vertex:"CubicVR/post_shaders/fx_general.vs",
+      				  shader_fragment:"shader_custom/normalizer.fs"
+      				});
+
+              var i = 0;
+              var shaderActive = 0;
+              
+       				fxSelect = document.getElementById("shaderSelector");
+      				fxSelect.options[i] = new Option("Depth Buffer View",i++);
+      				fxSelect.options[i] = new Option("Invert Color",i++);
+      				fxSelect.options[i] = new Option("Screen-Space Ambient Occlusion",i++);
+      				fxSelect.options[shaderActive=i] = new Option("6-Tap Depth Of Field",i++);
+      				fxSelect.options[i] = new Option("Block Twist",i++);
+      				fxSelect.options[i] = new Option("Kick Sine Color Tear",i++);
+      				fxSelect.options[i] = new Option("Scanline Tear + Shake",i++);
+      				fxSelect.options[i] = new Option("Scanline CheapTV + Color Bleed",i++);
+              // fxSelect.options[i] = new Option("New Bloom Shader Test #1: pass2",i++);
+              // fxSelect.options[i] = new Option("New Bloom Shader Test #1: pass1",i++);
+              // fxSelect.options[i] = new Option("New Bloom Shader Test #2: 6-Tap",i++);
+      				fxSelect.options[i] = new Option("6-Tap Bloom, 1/2 blend",i++);
+      				fxSelect.options[i] = new Option("6-Tap Bloom, 1/4 blend",i++);
+      				fxSelect.options[i] = new Option("Pixelator",i++);
+      				fxSelect.options[i] = new Option("Normalizer",i++);
+//      				fxSelect.selectedIndex = fxSelect.options.length-1;
+      				fxSelect.selectedIndex = shaderActive;
+
+      				
+      				shaderList.push(shaderDepth);
+      				shaderList.push(shaderInvert);
+      				shaderList.push(shaderSSAO);
+      				shaderList.push(shaderDOF6);
+      				shaderList.push(shaderBlockTwist);
+      				shaderList.push(shaderKickSine);
+      				shaderList.push(shaderScanlineShake);
+      				shaderList.push(shaderCheapTV);
+              // shaderList.push(shaderBloom2);
+              // shaderList.push(shaderBloom);
+              // shaderList.push(shaderBloom6);
+      				shaderList.push(shaderHalfBloom);
+      				shaderList.push(shaderQuarterBloom);
+      				shaderList.push(shaderPixelate);
+      				shaderList.push(shaderNorm);
+
+      				for (var i = 0; i < shaderList.length; i++)
+      				{
+                fxChain.addShader(shaderList[i]);
+      				  shaderList[i].enabled = false;
+      				}
+      				
+      				shaderList[fxSelect.selectedIndex].enabled = true;
+      			}
+      			
+      			function selectShaderFX(elem)
+      			{
+              fxSelect = document.getElementById("shaderSelector");
+      				
+      				for (var i = 0; i < fxSelect.length; i++)
+      				{
+      				  shaderList[i].enabled = (fxSelect.options[i].selected)?true:false;
+      				}
+      			}
+
+
+
+
+            var audio;
+            
+            var audioDurationInSeconds;
+            var audioDurationInRadians = 2*Math.PI;
+            var audioPositionInSeconds = 0;
+            var audioPositionInRadians = 0;
+
+            var bufferSize = 0;
+            var signal = new Float32Array(bufferSize);
+            var channels = 0;
+            var rate = 0;
+            var ftimer = 0;
+            var m_BeatTimer = 0;
+            var m_BeatCounter = 0;
+            var frameBufferLength = 0;
+            var fft = null;
+            var vu = null;
+            var bd = null;
+            var kick_det = null;
+            var audio_running = false;
+            var clearClr = [1, 1, 1];
+            var audioData = {vu:null,bd:null,signal:[],kick_det:null,clearClr:clearClr};
+
+            function audioPlay(event) {
+                audio_running = true;
+            }
+
+            function audioPause(event) {
+                audio_running = false;
+            }
+
+            function loadedMetadata() {
+                audio = document.getElementById('audio1');
+
+                audioDurationInSeconds = audio.duration;
+
+
+                channels = audio.mozChannels;
+                rate = audio.mozSampleRate;
+                frameBufferLength = audio.mozFrameBufferLength;
+
+                bufferSize = (frameBufferLength / channels) / 2;
+
+                fft = new RFFT(bufferSize, rate);
+                signal = new Float32Array(bufferSize);
+
+                bd = new BeatDetektor(75, 85);
+                kick_det = new BeatDetektor.modules.vis.BassKick();
+                vu = new BeatDetektor.modules.vis.VU();
+
+                audioData.vu = vu;
+                audioData.bd = bd;
+                audioData.kick_det = kick_det;
+                
+
+                audio.addEventListener("MozAudioAvailable", audioAvailable, false);
+            }
+
+            function audioAvailable(event) {
+                audio_timer = event.time;
+                
+                audioPositionInSeconds = audio.currentTime;
+                audioPositionInRadians = audioPositionInSeconds / audioDurationInSeconds * audioDurationInRadians;
+                
+                // if (!beatdetektor_enabled) return;
+                if (fft == null) return;
+
+                var fb = event.frameBuffer;
+
+                for (var i = 0, fbl = bufferSize; i < fbl; i++) {
+                    // Assuming interlaced stereo channels,
+                    // need to split and merge into a stero-mix mono signal
+                    signal[i] = (fb[2 * i] + fb[2 * i + 1]) / 2;
+                }
+                
+                audioData.signal = signal;
+
+                fft.forward(signal);
+
+                //      timestamp = document.getElementById('audio1').currentTime;
+                timestamp = event.time;
+
+                bd.process(timestamp, fft.spectrum);
+
+                if (bd.win_bpm_int_lo) {
+                    m_BeatTimer += bd.last_update;
+
+                    if (m_BeatTimer > (60.0 / bd.win_bpm_int_lo)) {
+                        m_BeatTimer -= (60.0 / bd.win_bpm_int_lo);
+                        clearClr[0] = 0.5 + Math.random() / 2;
+                        clearClr[1] = 0.5 + Math.random() / 2;
+                        clearClr[2] = 0.5 + Math.random() / 2;
+                        m_BeatCounter++;
+                        audioData.clearClr = clearClr;
+                    }
+                }
+
+                ftimer += bd.last_update;
+                if (ftimer > 1.0 / 24.0) {
+                    vu.process(bd, ftimer);
+
+                    ftimer = 0;
+                }
+            }
+            
+            /** Sequencer setup **/
+            var selected = {bank: null, track: null};
+
+            function isTrackSelected() {
+              return (selected.bank !== null && selected.track !== null);
+            }
+
+            function startTrack(bankId) {
+              if (typeof banks[bankId] === "undefined") { // track bank does not exist yet
+                banks[bankId] = [];
+              }
+
+              var currentTrackId = banks[bankId].length;
+
+              if (currentTrackId - 1 >= 0 && banks[bankId][currentTrackId - 1].end == null) { // track has not finished
+                // do nothing
+              } else {
+                banks[bankId].push({
+                  start: audioPositionInRadians,
+                  end: null
+                });
+
+                selected.bank = bankId;
+                selected.track = currentTrackId;
+              }
+            }
+
+            function endTrack(bankId) {
+              var currentTrackId = banks[bankId].length - 1;
+
+              banks[bankId][currentTrackId].end = audioPositionInRadians;
+            }
+
+            function findActiveBanks(position) {
+              var activeBanks = {};
+              var activeTrack = null;
+              for (var i in banks) {
+                activeTrack = findActiveTrack(i, position);
+                if (activeTrack !== null) {
+                  activeBanks[i] = activeTrack;
+                }
+              }
+              return activeBanks;
+            }
+
+            function findActiveTrack(bankId, position) {
+              var bank = banks[bankId];
+              for (var i = 0, len = bank.length; i < len; i++) {
+                if (bank[i].start <= position && position <= bank[i].end) {
+                  return i;
+                }
+              }
+              return null;
+            }
+
+            var scene;
+            var light_test;
+
+            var fx;
+
+            var boxObject;
+            var boxMat;
+            var box;
+            
+            var viz1Texture;
+
+            var eyeTexture;
+            
+            var hudModel;
+            // var hudTexture;
+            var hudMaterial;
+            
+            function buildHUD()
+            {
+              hudModel = new CubicVR.Mesh("hud");
+//              hudTexture = new CubicVR.PJSTexture("pjstextures/sequencer_tex.pjs",512,512);
+              hudMaterial = new CubicVR.Material("hudMat");
+              // hudMaterial.setTexture(hudTexture,CubicVR.enums.texture.map.COLOR);
+              // hudMaterial.setTexture(hudTexture,CubicVR.enums.texture.map.ALPHA);
+              
+              hudModel.addPoint([[-1,-1,0],[-1,1,0],[1,1,0],[1,-1,0]]);
+              
+              hudModel.setFaceMaterial(hudMaterial);
+              
+              var f = hudModel.addFace([0,1,2,3]);
+              
+              hudModel.faces[f].setUV([[0,0],[0,1],[1,1],[1,0]]);
+              hudModel.faces[f].flip();
+              
+              hudModel.triangulateQuads();
+              hudModel.calcNormals();
+              hudModel.compile();     
+              
+              // hudTexture.canvas.style.position="absolute";
+              // hudTexture.canvas.style.left="0px";
+              // hudTexture.canvas.style.top="0px";
+              
+              // document.body.appendChild(hudTexture.canvas);
+            } 
+            
+            
+            function renderHUD()
+            {
+              // cubicvr_renderObject(obj_in, mv_matrix, p_matrix, o_matrix, lighting)
+              var hudScale = 1/3;
+              
+              var tm = new CubicVR.Transform();
+              tm.scale([hudScale,aspect*hudScale,0]);
+              tm.translate([1-hudScale,-1+aspect*hudScale,0]);
+              var t = tm.getResult();
+              
+              CubicVR.renderObject(hudModel,cubicvr_identity,cubicvr_identity,t);
+            }
+            
+            function updateHUDTexture()
+            {
+              // hudTexture.update();
+            }
+
+            /** Build a simple test scene with a pjs mapped cube **/
+
+            var landscape, landscapeMaterial, landscapeTexture;
+
+            function buildLandscape() {
+
+            		// Create a Planar UV Mapper
+                var landscapeMapper = new CubicVR.UVMapper();
+                landscapeMapper.projection_mode = CubicVR.enums.uv.projection.PLANAR;
+                landscapeMapper.projection_axis = CubicVR.enums.uv.axis.Y;
+                landscapeMapper.scale = [2,2,2];
+                landscapeMapper.diffuse = [1,1,1];
+
+                // Viz texture init
+                eyeTexture = new CubicVR.PJSTexture("pjstextures/floor_tex.pjs",128,128);
+                
+
+                // Create the lanscape material
+        				landscapeMaterial = new CubicVR.Material("landscapeMat");
+                landscapeTexture = new CubicVR.Texture("images/eyes.jpg");
+                // landscapeMaterial.setTexture(landscapeTexture,CubicVR.enums.texture.map.COLOR); 
+                landscapeMaterial.setTexture(eyeTexture, CubicVR.enums.texture.map.COLOR);
+                //landscapeMaterial.setTexture(eyeTexture, CubicVR.enums.texture.map.AMBIENT);
+
+                // generate a new landscape, size 100, 80x80 divisions
+        				landscape = new CubicVR.Landscape(100,80,80, landscapeMaterial);
+
+                // make it wavy
+                var w = 0.2;
+                var q = 0.5;
+                
+                                for (var i = 0; i < landscape.obj.points.length; i++)
+                                {
+                                 var x,z;
+                                   x = landscape.obj.points[i][0]/5.0;
+                                   z = landscape.obj.points[i][2]/5.0;
+                                
+                                   landscape.obj.points[i][1] = (1.0*(Math.sin(z+q)-Math.sin(x+w))+0.3*(Math.cos(z+x-w)-Math.sin(x-z-q))+1.19*(Math.cos(z*1.4- x*1.8 +q)-Math.sin(2.0*x+z +q)+2.0*Math.sin(M_PI*Math.cos(x*0.2 + z*0.15))-2.0*Math.cos(2.0*M_PI*Math.sin(x*0.02 + z*0.15))))*0.75;
+                                }
+
+                // Calculate normals for lighting
+        				landscape.obj.calcNormals();
+
+                // Apply UV
+                landscapeMapper.apply(landscape.obj,landscapeMaterial);
+
+                // Compile and upload
+        				landscape.obj.compile();
+
+                // Bind to scene
+        				scene.bindSceneObject(landscape);              
+            }
+            
+            
+            var numVUBox = 32;
+            var vu_boxObject;
+            var vu_boxMat;
+            var vu_box = new Array(numVUBox);
+            
+            function buildVUBox() {
+              vu_boxObject = new CubicVR.Mesh("vu_box");
+              vu_boxMat = new CubicVR.Material("vu_boxMaterial");
+
+              CubicVR.genBoxObject(vu_boxObject, 1.0, vu_boxMat, (new CubicVR.Transform()).translate([0,0.5,0]));
+
+              vu_boxObject.triangulateQuads();
+              vu_boxObject.calcNormals();
+
+              vu_boxObject.compile();
+
+              var vu_rad = 15.0;
+
+              for (var i = 0; i <= numVUBox; i++)
+              {
+                var p = (i/numVUBox)*2.0*M_PI;
+                
+                vu_box[i] = new CubicVR.SceneObject(vu_boxObject);
+                vu_box[i].position = [vu_rad*Math.sin(p),5,vu_rad*-Math.cos(p)];
+                vu_box[i].rotation = [90,-p*(180.0/M_PI),0];
+                vu_box[i].visible = false;
+                
+               scene.bindSceneObject(vu_box[i]);
+              }
+            }
+            
+            var omar_box;
+            var omar_boxObject;
+            var omar1_boxMat;
+            var omar2_boxMat;
+            var omar1_texture;
+            var omar2_texture;
+            
+            function buildOmarBox() {
+              omar_boxObject = new CubicVR.Mesh("omar_box");
+              omar1_boxMat = new CubicVR.Material("omar1_boxMaterial");
+              omar2_boxMat = new CubicVR.Material("omar2_boxMaterial"); 
+              omar1_texture = new CubicVR.Texture("images/omar2.jpg");
+              omar2_texture = new CubicVR.Texture("images/omar1.jpg");
+              
+              omar1_boxMat.setTexture(omar1_texture, CubicVR.enums.texture.map.COLOR);
+              omar2_boxMat.setTexture(omar2_texture, CubicVR.enums.texture.map.COLOR);
+              
+              //omar_boxMat.setTexture(omar_texture, CubicVR.enums.texture.map.AMBIENT);
+              
+              // Create a UV Mapper for applying the texture maps
+              var boxUV = new CubicVR.UVMapper();
+
+              // Use Cubic projection
+              boxUV.projection_mode = CubicVR.enums.uv.projection.CUBIC;
+              
+              // scale the texture map to 50% on X/Y/Z
+              boxUV.scale = [1, 1, 1];
+              
+              CubicVR.genBoxObject(omar_boxObject, 1.0, omar1_boxMat);
+
+              for (var i = 0; i < omar_boxObject.faces.length; i++) {
+                omar_boxObject.faces[i].flip();
+                if (i == 2 || i == 4) {
+                  omar_boxObject.faces[i].material = omar2_boxMat.material_id;
+                }
+              }
+              
+              omar_boxObject.triangulateQuads();
+              omar_boxObject.calcNormals();
+              
+              // Apply this UV Map to the boxObject for faces using material boxMat
+              boxUV.apply(omar_boxObject, omar1_boxMat);
+              boxUV.apply(omar_boxObject, omar2_boxMat);
+
+              omar_boxObject.compile();
+              omar_box = new CubicVR.SceneObject(omar_boxObject);
+              omar_box.scale =[50, 50, 50];
+              omar_box.position = [0, 0.33 * 50, 0];
+              scene.bindSceneObject(omar_box);
+            }
+            
+
+            function buildScene() {
+                // Scene container, holds all objects, lights and camera
+                scene = new CubicVR.Scene();
+                
+                CubicVR.setGlobalAmbient([0.5,0.5,0.5]);
+
+                buildLandscape();
+                buildVUBox();
+                buildOmarBox();
+                buildHUD();
+
+                // Create an empty object to build our box
+                boxObject = new CubicVR.Mesh("box1");
+
+                // Material to apply to the box object
+                boxMat = new CubicVR.Material("boxMaterial");
+
+                // Viz texture init
+                viz1Texture = new CubicVR.PJSTexture("pjstextures/viz2_tex.pjs",128,128);
+
+                // Set the viz texture to the 'Color' and 'Ambient' (lighting) map of the box material
+                boxMat.setTexture(viz1Texture, CubicVR.enums.texture.map.COLOR);
+                boxMat.setTexture(viz1Texture, CubicVR.enums.texture.map.AMBIENT);
+
+                // Create a UV Mapper for applying the texture maps
+                var boxUV = new CubicVR.UVMapper();
+
+                // Use Cubic projection
+                boxUV.projection_mode = CubicVR.enums.uv.projection.CUBIC;
+                // scale the texture map to 50% on X/Y/Z
+                boxUV.scale = [0.5, 0.5, 0.5];
+
+                // Generate a new box, size=1.0, apply boxMat to all faces
+                CubicVR.genBoxObject(boxObject, 1.0, boxMat);
+
+                // Convert any quads into triangles
+                boxObject.triangulateQuads();
+                // Calculate the normals (required for UV mapping and lighting)
+                boxObject.calcNormals();
+
+                // Apply this UV Map to the boxObject for faces using material boxMat
+                boxUV.apply(boxObject, boxMat);
+
+                // Compile the box object and upload it to the video card
+                boxObject.compile();
+
+
+                // Create a box sceneObject, it becomes a container for our boxObject that will allow us to manipulate it
+                box = new CubicVR.SceneObject(boxObject, "box");
+
+                // Set the position
+                box.position = [0,6,0];
+
+                // Bind our box to the scene, this makes it part of the scene
+               scene.bindSceneObject(box);
+
+                // Set up our camera properties, each scene comes with a default camera
+                scene.camera.setFOV(60);
+                scene.camera.setDimensions(canvas_w, canvas_h);
+                scene.camera.setClip(0.1, 60);
+
+                // Create a simple point light
+                light_test = new CubicVR.Light(CubicVR.enums.light.type.POINT);
+                // light_test.setDirection([1,1,1]);
+                // Set the basic light parameters
+                light_test.position = box.position; //[10, 30, -10]; // position in space
+                light_test.distance = 100; // falloff max. distance
+                light_test.diffuse = [1, 1, 1]; // diffuse color
+                light_test.specular = [0.5, 0.5, 0.5]; // specular color
+                // Bind our light to the scene, it will now illuminate any bound objects when rendered
+               scene.bindLight(light_test);
+
+                // Clear the global ambient so that "no light" = "black"
+                CubicVR.setGlobalAmbient([0, 0, 0]);
+                
+                camTarget = box.position;
+                
+                // AutoCam Prototype test
+                autoCam = new CubicVR.AutoCamera();
+                autoCam.addAvoidSphere([0,6,0],7.0);   
+
+                CubicVR.setGlobalDepthAlpha(true,scene.camera.nearclip,scene.camera.farclip);
+            }
+
+
+            function webGLStart() {
+                var canvas = document.getElementById("cubicvr-canvas");
+                initGL(canvas);
+
+                buildScene();
+
+                // first canvas init, set clear depth and empty it
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);
+
+                gl.clearDepth(1.0);
+
+                gl.enable(gl.DEPTH_TEST);
+                gl.depthFunc(gl.LEQUAL);
+
+                // event listener bindings
+                canvas.addEventListener('mousemove', mouseMove, false);
+                canvas.addEventListener('mousedown', mouseDown, false);
+                canvas.addEventListener('mouseup', mouseUp, false);
+                canvas.addEventListener('mousewheel', mouseWheel, false);
+                canvas.addEventListener('DOMMouseScroll', mouseWheel, false);
+
+                setupShaderFX(canvas.width,canvas.height);
+
+                setInterval(drawScene, 15);
+                
+                doWindowResize();
+            }
+
+
+            /** PJS->Texture update function for viz texture **/
+
+            function updateVizTexture() {
+                viz1Texture.update();
+                eyeTexture.update();
+            }
+
+
+            var camPos = [100, 100, 100]; // This is why it 'zooms' in, we start way out and let the camera tracker bring us in
+            var camTarget = [0, 0, 0]; // Target is fixed at scene origin
+            var camDist = 9.0; // Default camera distance
+            var timerMilliseconds;
+            var timerSeconds = 0;
+            var timerLastSeconds = 0;
+            var frameCounter = 0;
+
+            var autoCam;
+            
+
+            /** Timer **/
+
+            function runTimer() {
+                if (!timerMilliseconds) {
+                    timerMilliseconds = (new Date()).getTime();
+                    return;
+                }
+
+                frameCounter++;
+
+                var newTimerMilliseconds = (new Date()).getTime();
+
+                timerLastSeconds = (newTimerMilliseconds - timerMilliseconds) / 1000.0;
+
+                if (timerLastSeconds > (1 / 10)) timerLastSeconds = (1 / 10);
+
+                timerSeconds += timerLastSeconds;
+                timerMilliseconds = newTimerMilliseconds;
+            }
+
+
+
+
+            /** Simple random rotation glitch controller test */
+            var rinc = [10.5, 3.2, 3.4]; // default rotation vector
+            var rdir = 1; // rotation direction
+            var vu_visible = false;
+            
+            var triggerKey = {BASSDRUM:0,CLAP:1,CRASH:2,BOOM:3,GLITCH:4,STAB:5};
+            var triggerName = ["bassdrum","clap","crash","boom","glitch","stab"];
+            var triggerSource = [false,false,false,false,false,false];
+            var triggerVal = [0,0,0,0,0,0];
+
+            function evaluate() {
+                updateVizTexture();
+                updateHUDTexture();
+
+                scene.camera.setFOV(80+(25.0*Math.sin(timerSeconds)+8.0*Math.cos(timerSeconds*2.1)));
+
+                // Make a clamped evaluation of the lowest (bass) channel in BeatDetektor
+                //var kickSource = vu.vu_levels[0];
+                //bassdrum, clap, crash, boom, glitch, stab
+
+                triggerSource[triggerKey.BASSDRUM] = findActiveTrack("bassdrum", audioPositionInRadians);
+                triggerSource[triggerKey.CLAP] = findActiveTrack("clap", audioPositionInRadians);
+                triggerSource[triggerKey.CRASH] = findActiveTrack("crash", audioPositionInRadians);
+                triggerSource[triggerKey.BOOM] = findActiveTrack("boom", audioPositionInRadians);
+                triggerSource[triggerKey.GLITCH] = findActiveTrack("glitch", audioPositionInRadians);
+                triggerSource[triggerKey.STAB] = findActiveTrack("stab", audioPositionInRadians);
+                
+                for (var i = 0, iMax=triggerName.length; i < iMax; i++)
+                {
+                  if (findActiveTrack(triggerName[i], audioPositionInRadians) !== null) {
+                    triggerVal[i] += 0.65;
+                  }
+                  else
+                  {
+                    triggerVal[i] -= triggerVal[i]*0.98*timerLastSeconds*3.0;
+                  }
+
+                  if (triggerVal[i] != triggerVal[i]) triggerVal[i] = 0;
+                  if (!triggerVal[i]) triggerVal[i] = 0;
+                  if (triggerVal[i] < 0) triggerVal[i] = 0;
+                  if (triggerVal[i] > 0.75) triggerVal[i] = 0.75;
+
+                }
+
+                // Generate a scale value >= 1.0
+                var scaleVal = triggerVal[triggerKey.CLAP]*6.0 + 4.0;
+                box.scale = [scaleVal, scaleVal, scaleVal];
+
+                //        box.rotation = [timerSeconds*16.0-kickSource*15.0,timerSeconds*14.5-kickSource*15.0,0];
+                //        box.rotation = [timerSeconds*16.0-kickSource*65.0,timerSeconds*14.5-kickSource*75.0,0];
+                
+                // Increment current rotation by rotation vector at a magnitude of 'kickSource'
+                box.rotation = CubicVR.vec3.add(box.rotation, CubicVR.vec3.multiply(rinc, timerLastSeconds * 40.0 * (triggerVal[triggerKey.CLAP] * rdir + 0.1)));
+
+                // randomly switch direction and rotation vector
+                if (Math.floor(Math.random() * 100) == 50) {
+                    rdir = -rdir;
+                    rinc = [Math.random() * 20.0, Math.random() * 20.0, Math.random() * 20.0];
+                }
+                
+                // Make our light match the kick too
+                light_test.intensity = 4.0*triggerVal[triggerKey.CLAP]+0.4; 
+                light_test.diffuse = clearClr;
+                
+                if (findActiveTrack("s", audioPositionInRadians) !== null) {
+                  for (var i = 0; i <= numVUBox; i++)
+                  {
+                    vu_box[i].visible=true;
+                    vu_box[i].scale[1] = 1.0+(vu.vu_levels[i*2]*10.0);
+                  }
+                  vu_visible = true;
+                }
+                else if (vu_visible)
+                {
+                  for (var i = 0; i <= numVUBox; i++)
+                  {
+                    vu_box[i].visible=false;
+                  }
+
+                  vu_visible = false;
+                }
+                
+                vu_boxMat.ambient = clearClr;
+            }
+
+
+            /** Main draw loop **/
+            
+            var camTimerOfs = 0;
+
+            function drawScene() {
+                runTimer();
+
+            		if (audio.currentTime > 10 && audio.currentTime < 15) 
+            		{
+            		  document.getElementById('logoDiv1').style.opacity = (5-(timerSeconds-10))/5.0;
+            		  document.getElementById('logoDiv2').style.opacity = 1.0-((5-(timerSeconds-10))/5.0);
+            		}
+               if (audio.currentTime > 15 && audio.currentTime < 16) { 
+                  document.getElementById('logoDiv1').style.opacity = 0; 
+                  document.getElementById('logoDiv2').style.opacity = 100;
+               }
+           		if (audio.currentTime > 18 && audio.currentTime < 23) 
+           		{
+           		  document.getElementById('logoDiv2').style.opacity = ((5-(timerSeconds-18))/5.0);
+           		}
+              if (audio.currentTime > 23 && audio.currentTime < 24) { 
+                 document.getElementById('logoDiv2').style.opacity = 0;
+              }
+
+                evaluate();
+                
+                camTimerOfs += (triggerVal[triggerKey.CLAP]/2.0)*timerLastSeconds*10.0;
+                camPos = autoCam.run(timerSeconds+camTimerOfs);
+
+                // scene.evaluate(timerSeconds);  // used if evaluating and applying all sceneObject motions
+                // Open the FX buffer
+                fxChain.begin();
+                
+                // Clear the FX buffer
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+                // This keeps the camPos orbiting around camTarget at camDist distance, tracking speed 0.05
+//                camPos = CubicVR.trackTarget(camPos, camTarget, 0.05, camDist);
+
+                // Apply result of tracking
+                scene.camera.position = camPos;
+                scene.camera.target = camTarget;
+
+                // Render our scene into the FX bufer (scene contains our objects and lights)
+                scene.render();
+
+                fxChain.end();
+
+                // Close the FX buffer
+
+                // Clear the canvas
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);
+                gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+                
+                fxChain.render();
+            }
+
+
+            /** Event handlers **/
+            var windowTimer = null;
+
+            window.onresize = function() {
+                if (windowTimer == null) {
+                    windowTimer = setTimeout(doWindowResize, 1000);
+                }
+                else {
+                    clearTimeout(windowTimer);
+                    windowTimer = setTimeout(doWindowResize, 1000);
+                }
+            }
+
+
+            function doWindowResize() {
+                if (!gl) return;
+
+                var canvas = document.getElementById("cubicvr-canvas");
+                var hudCvs = document.getElementById("seqCanvas");
+                var logoDiv1 = document.getElementById("logoDiv1");
+                var logoDiv2 = document.getElementById("logoDiv2");
+                
+                canvas_w = parseInt(window.innerWidth);
+                canvas_h = parseInt(window.innerHeight);
+                aspect = canvas_w / canvas_h;
+
+                canvas.width = canvas_w;
+                canvas.height = canvas_h;
+                // hudTexture.canvas.style.top = canvas.height - hudTexture.canvas.height + "px";
+                // hudTexture.canvas.style.left = canvas.width - hudTexture.canvas.width + "px";
+
+                logoDiv1.style.top = (canvas.height - 175)+"px"; 
+                logoDiv2.style.top = (canvas.height - 175)+"px"; 
+
+                scene.camera.setDimensions(canvas_w, canvas_h);
+                fxChain.resize(canvas_w, canvas_h);
+
+                gl.viewport(0, 0, canvas_w, canvas_h);
+            }
+            
+            function toggleLighting() {
+              if (scene.lights.length) {
+                scene.lights = [];
+              } else {
+                scene.bindLight(light_test);
+              } 
+            }
+
+
+            var mpos = [0, 0]
+            var mdown = false;
+
+            function mouseDown(ev) {
+                mdown = true;
+                mpos = [ev.clientX, ev.clientY];
+            }
+
+            function mouseUp(ev) {
+                mdown = false;
+            }
+
+            function mouseMove(ev) {
+                if (!mdown) return;
+
+                var mdelta = new Array();
+
+                mdelta[0] = mpos[0] - ev.clientX;
+                mdelta[1] = mpos[1] - ev.clientY;
+
+                mpos = [ev.clientX, ev.clientY];
+
+                camPos = CubicVR.vec3.moveViewRelative(camPos, camTarget, camDist * mdelta[0] / 300.0, 0);
+                camPos[1] -= camDist * mdelta[1] / 300.0;
+
+                camPos = CubicVR.vec3.trackTarget(camPos, camTarget, 1.0, camDist);
+            }
+
+            function mouseWheel(ev) {
+                var delta = ev.wheelDelta ? ev.wheelDelta : (-ev.detail * 10.0);
+
+                camDist -= delta / 100.0;
+                if (camDist < 0.3) camDist = 0.3;
+                if (camDist > 2000.0) camDist = 2000.0;
+            }
+        </script>
+    </head>
+    
+    <body onLoad="webGLStart();" style='margin:0px;overflow:hidden;background:black'>
+        <script type='text/javascript'>
+            canvas_w = window.innerWidth;
+            canvas_h = window.innerHeight;
+            aspect = canvas_w / canvas_h;
+
+            document.write("<canvas id='cubicvr-canvas' style='border: none;' width='" + window.innerWidth + "' height='" + (window.innerHeight) + "'></canvas>");
+        </script>
+        <div id='logoDiv1' style="position:absolute; top:0px; left:0px; font-family: Arial, sans-serif; font-size: 14px; letter-spacing: 5px; line-height: 26px; text-transform: uppercase; font-weight: bold; color: #fff; text-shadow: 1px 1px 20px #fff; text-align: center; background:url('kraddy-logo.png'); width: 255px; height: 69px; display: block; padding: 100px 0 0 15px">
+        <em>No Comply</em><br />
+        Labyrinth EP<br />
+        Label<br />
+        </div>
+        <div id="logoDiv2" style="position: absolute; top: 0px; left: 0px; opacity: 0; font-family: Arial, sans-serif; font-size: 14px; letter-spacing: 5px; line-height: 26px; text-transform: uppercase; font-weight: bold; color: #fff; text-shadow: 1px 1px 20px #fff; text-align: center; width: 255px; display: block; padding: 0px 0 0 15px">
+        <img src="images/firefox-anim.gif" style="float:left" width="100">
+          The Audio API Team
+        </div>
+        <audio id='audio1' style='position:absolute; top:0px; left:0px' tabindex='0'
+          src='no-comply.ogg' controls='true' preload='true' onplay='audioPlay()'
+          onpause='audioPause()' onmozaudioavailable='audioAvailable(event);' onloadedmetadata='loadedMetadata();'></audio>
+        <div style='position:absolute; top:60px; left:10px; color:white; font-family:Arial; font-size:14px;'>
+          &nbsp;&nbsp;Change FX (multi): <a href="javascript:void(0)" onclick="document.getElementById('fxDiv').style.display=(document.getElementById('fxDiv').style.display=='none')?'':'none';" style='text-decoration:none'>( toggle )</a><div style='' id='fxDiv'><br /><select id="shaderSelector" onchange="selectShaderFX(this)" multiple size="15" style='vertical-align:top'></select><br/>
+            Blur opac: <input type='text' onchange="fxChain.setBlurOpacity(parseFloat(this.value))" size='4' value="0.3"> intens:<input type='text' onchange="fxChain.setBlurIntensity(parseFloat(this.value))" size='4' value="0.7"><br/></div>
+          <input type='checkbox' id='lighting_enable' onchange="toggleLighting(this)" checked> Lighting Enabled
+        </div>
+    </body>
+
+</html>
